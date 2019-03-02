@@ -73,9 +73,9 @@ CODE
 // [SECTION] KEYBOARD/GAMEPAD NAVIGATION
 // [SECTION] COLUMNS
 // [SECTION] DRAG AND DROP
-// [SECTION] DOCKING
 // [SECTION] LOGGING/CAPTURING
 // [SECTION] SETTINGS
+// [SECTION] DOCKING
 // [SECTION] PLATFORM DEPENDENT HELPERS
 // [SECTION] METRICS/DEBUG WINDOW
 
@@ -375,6 +375,7 @@ CODE
  - 2018/XX/XX (1.XX) - Moved IME support functions from io.ImeSetInputScreenPosFn, io.ImeWindowHandle to the PlatformIO api.
  
 
+ - 2019/02/26 (1.69) - renamed ImGuiColorEditFlags_RGB/ImGuiColorEditFlags_HSV/ImGuiColorEditFlags_HEX to ImGuiColorEditFlags_DisplayRGB/ImGuiColorEditFlags_DisplayHSV/ImGuiColorEditFlags_DisplayHex. Kept redirection enums (will obsolete).
  - 2019/02/14 (1.68) - made it illegal/assert when io.DisplayTime == 0.0f (with an exception for the first frame). If for some reason your time step calculation gives you a zero value, replace it with a dummy small value!
  - 2019/02/01 (1.68) - removed io.DisplayVisibleMin/DisplayVisibleMax (which were marked obsolete and removed from viewport/docking branch already).
  - 2019/01/06 (1.67) - renamed io.InputCharacters[], marked internal as was always intended. Please don't access directly, and use AddInputCharacter() instead!
@@ -10101,6 +10102,455 @@ void ImGui::EndDragDropTarget()
 }
 
 //-----------------------------------------------------------------------------
+// [SECTION] LOGGING/CAPTURING
+//-----------------------------------------------------------------------------
+// All text output from the interface can be captured into tty/file/clipboard. 
+// By default, tree nodes are automatically opened during logging.
+//-----------------------------------------------------------------------------
+
+// Pass text data straight to log (without being displayed)
+void ImGui::LogText(const char* fmt, ...)
+{
+    ImGuiContext& g = *GImGui;
+    if (!g.LogEnabled)
+        return;
+
+    va_list args;
+    va_start(args, fmt);
+    if (g.LogFile)
+        vfprintf(g.LogFile, fmt, args);
+    else
+        g.LogBuffer.appendfv(fmt, args);
+    va_end(args);
+}
+
+// Internal version that takes a position to decide on newline placement and pad items according to their depth.
+// We split text into individual lines to add current tree level padding
+void ImGui::LogRenderedText(const ImVec2* ref_pos, const char* text, const char* text_end)
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = g.CurrentWindow;
+
+    if (!text_end)
+        text_end = FindRenderedTextEnd(text, text_end);
+
+    const bool log_new_line = ref_pos && (ref_pos->y > g.LogLinePosY + 1);
+    if (ref_pos)
+        g.LogLinePosY = ref_pos->y;
+    if (log_new_line)
+        g.LogLineFirstItem = true;
+
+    const char* text_remaining = text;
+    if (g.LogDepthRef > window->DC.TreeDepth)  // Re-adjust padding if we have popped out of our starting depth
+        g.LogDepthRef = window->DC.TreeDepth;
+    const int tree_depth = (window->DC.TreeDepth - g.LogDepthRef);
+    for (;;)
+    {
+        // Split the string. Each new line (after a '\n') is followed by spacing corresponding to the current depth of our log entry.
+        // We don't add a trailing \n to allow a subsequent item on the same line to be captured.
+        const char* line_start = text_remaining;
+        const char* line_end = ImStreolRange(line_start, text_end);
+        const bool is_first_line = (line_start == text);
+        const bool is_last_line = (line_end == text_end);
+        if (!is_last_line || (line_start != line_end))
+        {
+            const int char_count = (int)(line_end - line_start);
+            if (log_new_line || !is_first_line)
+                LogText(IM_NEWLINE "%*s%.*s", tree_depth * 4, "", char_count, line_start);
+            else if (g.LogLineFirstItem)
+                LogText("%*s%.*s", tree_depth * 4, "", char_count, line_start);
+            else 
+                LogText(" %.*s", char_count, line_start);
+            g.LogLineFirstItem = false;
+        }
+        else if (log_new_line)
+        {
+            // An empty "" string at a different Y position should output a carriage return.
+            LogText(IM_NEWLINE);
+            break;
+        }
+
+        if (is_last_line)
+            break;
+        text_remaining = line_end + 1;
+    }
+}
+
+// Start logging/capturing text output
+void ImGui::LogBegin(ImGuiLogType type, int auto_open_depth)
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = g.CurrentWindow;
+    IM_ASSERT(g.LogEnabled == false);
+    IM_ASSERT(g.LogFile == NULL);
+    IM_ASSERT(g.LogBuffer.empty());
+    g.LogEnabled = true;
+    g.LogType = type;
+    g.LogDepthRef = window->DC.TreeDepth;
+    g.LogDepthToExpand = ((auto_open_depth >= 0) ? auto_open_depth : g.LogDepthToExpandDefault);
+    g.LogLinePosY = FLT_MAX;
+    g.LogLineFirstItem = true;
+}
+
+void ImGui::LogToTTY(int auto_open_depth)
+{
+    ImGuiContext& g = *GImGui;
+    if (g.LogEnabled)
+        return;
+    LogBegin(ImGuiLogType_TTY, auto_open_depth);
+    g.LogFile = stdout;
+}
+
+// Start logging/capturing text output to given file
+void ImGui::LogToFile(int auto_open_depth, const char* filename)
+{
+    ImGuiContext& g = *GImGui;
+    if (g.LogEnabled)
+        return;
+
+    // FIXME: We could probably open the file in text mode "at", however note that clipboard/buffer logging will still 
+    // be subject to outputting OS-incompatible carriage return if within strings the user doesn't use IM_NEWLINE.
+    // By opening the file in binary mode "ab" we have consistent output everywhere.
+    if (!filename)
+        filename = g.IO.LogFilename;
+    if (!filename || !filename[0])
+        return;
+    FILE* f = ImFileOpen(filename, "ab");
+    if (f == NULL)
+    {
+        IM_ASSERT(0);
+        return;
+    }
+
+    LogBegin(ImGuiLogType_File, auto_open_depth);
+    g.LogFile = f;
+}
+
+// Start logging/capturing text output to clipboard
+void ImGui::LogToClipboard(int auto_open_depth)
+{
+    ImGuiContext& g = *GImGui;
+    if (g.LogEnabled)
+        return;
+    LogBegin(ImGuiLogType_Clipboard, auto_open_depth);
+}
+
+void ImGui::LogToBuffer(int auto_open_depth)
+{
+    ImGuiContext& g = *GImGui;
+    if (g.LogEnabled)
+        return;
+    LogBegin(ImGuiLogType_Buffer, auto_open_depth);
+}
+
+void ImGui::LogFinish()
+{
+    ImGuiContext& g = *GImGui;
+    if (!g.LogEnabled)
+        return;
+
+    LogText(IM_NEWLINE);
+    switch (g.LogType)
+    {
+    case ImGuiLogType_TTY:
+        fflush(g.LogFile);
+        break;
+    case ImGuiLogType_File:
+        fclose(g.LogFile);
+        break;
+    case ImGuiLogType_Buffer:
+        break;
+    case ImGuiLogType_Clipboard:
+        if (!g.LogBuffer.empty())
+            SetClipboardText(g.LogBuffer.begin());
+        break;
+    case ImGuiLogType_None:
+        IM_ASSERT(0);
+        break;
+    }
+
+    g.LogEnabled = false;
+    g.LogType = ImGuiLogType_None;
+    g.LogFile = NULL;
+    g.LogBuffer.clear();
+}
+
+// Helper to display logging buttons
+// FIXME-OBSOLETE: We should probably obsolete this and let the user have their own helper (this is one of the oldest function alive!)
+void ImGui::LogButtons()
+{
+    ImGuiContext& g = *GImGui;
+
+    PushID("LogButtons");
+    const bool log_to_tty = Button("Log To TTY"); SameLine();
+    const bool log_to_file = Button("Log To File"); SameLine();
+    const bool log_to_clipboard = Button("Log To Clipboard"); SameLine();
+    PushItemWidth(80.0f);
+    PushAllowKeyboardFocus(false);
+    SliderInt("Default Depth", &g.LogDepthToExpandDefault, 0, 9, NULL);
+    PopAllowKeyboardFocus();
+    PopItemWidth();
+    PopID();
+
+    // Start logging at the end of the function so that the buttons don't appear in the log
+    if (log_to_tty)
+        LogToTTY();
+    if (log_to_file)
+        LogToFile();
+    if (log_to_clipboard)
+        LogToClipboard();
+}
+
+
+//-----------------------------------------------------------------------------
+// [SECTION] SETTINGS
+//-----------------------------------------------------------------------------
+
+void ImGui::MarkIniSettingsDirty()
+{
+    ImGuiContext& g = *GImGui;
+    if (g.SettingsDirtyTimer <= 0.0f)
+        g.SettingsDirtyTimer = g.IO.IniSavingRate;
+}
+
+void ImGui::MarkIniSettingsDirty(ImGuiWindow* window)
+{
+    ImGuiContext& g = *GImGui;
+    if (!(window->Flags & ImGuiWindowFlags_NoSavedSettings))
+        if (g.SettingsDirtyTimer <= 0.0f)
+            g.SettingsDirtyTimer = g.IO.IniSavingRate;
+}
+
+ImGuiWindowSettings* ImGui::CreateNewWindowSettings(const char* name)
+{
+    ImGuiContext& g = *GImGui;
+    g.SettingsWindows.push_back(ImGuiWindowSettings());
+    ImGuiWindowSettings* settings = &g.SettingsWindows.back();
+    settings->Name = ImStrdup(name);
+    settings->ID = ImHashStr(name, 0);
+    return settings;
+}
+
+ImGuiWindowSettings* ImGui::FindWindowSettings(ImGuiID id)
+{
+    ImGuiContext& g = *GImGui;
+    for (int i = 0; i != g.SettingsWindows.Size; i++)
+        if (g.SettingsWindows[i].ID == id)
+            return &g.SettingsWindows[i];
+    return NULL;
+}
+
+ImGuiWindowSettings* ImGui::FindOrCreateWindowSettings(const char* name)
+{
+    if (ImGuiWindowSettings* settings = FindWindowSettings(ImHashStr(name, 0)))
+        return settings;
+    return CreateNewWindowSettings(name);
+}
+
+void ImGui::LoadIniSettingsFromDisk(const char* ini_filename)
+{
+    size_t file_data_size = 0;
+    char* file_data = (char*)ImFileLoadToMemory(ini_filename, "rb", &file_data_size);
+    if (!file_data)
+        return;
+    LoadIniSettingsFromMemory(file_data, (size_t)file_data_size);
+    ImGui::MemFree(file_data);
+}
+
+ImGuiSettingsHandler* ImGui::FindSettingsHandler(const char* type_name)
+{
+    ImGuiContext& g = *GImGui;
+    const ImGuiID type_hash = ImHashStr(type_name, 0);
+    for (int handler_n = 0; handler_n < g.SettingsHandlers.Size; handler_n++)
+        if (g.SettingsHandlers[handler_n].TypeHash == type_hash)
+            return &g.SettingsHandlers[handler_n];
+    return NULL;
+}
+
+// Zero-tolerance, no error reporting, cheap .ini parsing
+void ImGui::LoadIniSettingsFromMemory(const char* ini_data, size_t ini_size)
+{
+    ImGuiContext& g = *GImGui;
+    IM_ASSERT(g.Initialized);
+    IM_ASSERT(g.SettingsLoaded == false && g.FrameCount == 0);
+
+    // For user convenience, we allow passing a non zero-terminated string (hence the ini_size parameter).
+    // For our convenience and to make the code simpler, we'll also write zero-terminators within the buffer. So let's create a writable copy..
+    if (ini_size == 0)
+        ini_size = strlen(ini_data);
+    char* buf = (char*)ImGui::MemAlloc(ini_size + 1);
+    char* buf_end = buf + ini_size;
+    memcpy(buf, ini_data, ini_size);
+    buf[ini_size] = 0;
+
+    void* entry_data = NULL;
+    ImGuiSettingsHandler* entry_handler = NULL;
+
+    char* line_end = NULL;
+    for (char* line = buf; line < buf_end; line = line_end + 1)
+    {
+        // Skip new lines markers, then find end of the line
+        while (*line == '\n' || *line == '\r')
+            line++;
+        line_end = line;
+        while (line_end < buf_end && *line_end != '\n' && *line_end != '\r')
+            line_end++;
+        line_end[0] = 0;
+        if (line[0] == ';')
+            continue;
+        if (line[0] == '[' && line_end > line && line_end[-1] == ']')
+        {
+            // Parse "[Type][Name]". Note that 'Name' can itself contains [] characters, which is acceptable with the current format and parsing code.
+            line_end[-1] = 0;
+            const char* name_end = line_end - 1;
+            const char* type_start = line + 1;
+            char* type_end = (char*)(intptr_t)ImStrchrRange(type_start, name_end, ']');
+            const char* name_start = type_end ? ImStrchrRange(type_end + 1, name_end, '[') : NULL;
+            if (!type_end || !name_start)
+            {
+                name_start = type_start; // Import legacy entries that have no type
+                type_start = "Window";
+            }
+            else
+            {
+                *type_end = 0; // Overwrite first ']'
+                name_start++;  // Skip second '['
+            }
+            entry_handler = FindSettingsHandler(type_start);
+            entry_data = entry_handler ? entry_handler->ReadOpenFn(&g, entry_handler, name_start) : NULL;
+        }
+        else if (entry_handler != NULL && entry_data != NULL)
+        {
+            // Let type handler parse the line
+            entry_handler->ReadLineFn(&g, entry_handler, entry_data, line);
+        }
+    }
+    ImGui::MemFree(buf);
+    g.SettingsLoaded = true;
+    DockContextOnLoadSettings(&g);
+}
+
+void ImGui::SaveIniSettingsToDisk(const char* ini_filename)
+{
+    ImGuiContext& g = *GImGui;
+    g.SettingsDirtyTimer = 0.0f;
+    if (!ini_filename)
+        return;
+
+    size_t ini_data_size = 0;
+    const char* ini_data = SaveIniSettingsToMemory(&ini_data_size);
+    FILE* f = ImFileOpen(ini_filename, "wt");
+    if (!f)
+        return;
+    fwrite(ini_data, sizeof(char), ini_data_size, f);
+    fclose(f);
+}
+
+// Call registered handlers (e.g. SettingsHandlerWindow_WriteAll() + custom handlers) to write their stuff into a text buffer
+const char* ImGui::SaveIniSettingsToMemory(size_t* out_size)
+{
+    ImGuiContext& g = *GImGui;
+    g.SettingsDirtyTimer = 0.0f;
+    g.SettingsIniData.Buf.resize(0);
+    g.SettingsIniData.Buf.push_back(0);
+    for (int handler_n = 0; handler_n < g.SettingsHandlers.Size; handler_n++)
+    {
+        ImGuiSettingsHandler* handler = &g.SettingsHandlers[handler_n];
+        handler->WriteAllFn(&g, handler, &g.SettingsIniData);
+    }
+    if (out_size)
+        *out_size = (size_t)g.SettingsIniData.size();
+    return g.SettingsIniData.c_str();
+}
+
+static void* SettingsHandlerWindow_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
+{
+    ImGuiWindowSettings* settings = ImGui::FindWindowSettings(ImHashStr(name, 0));
+    if (!settings)
+        settings = ImGui::CreateNewWindowSettings(name);
+    return (void*)settings;
+}
+
+static void SettingsHandlerWindow_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line)
+{
+    ImGuiWindowSettings* settings = (ImGuiWindowSettings*)entry;
+    float x, y;
+    int i;
+    ImU32 u1;
+    if (sscanf(line, "Pos=%f,%f", &x, &y) == 2)                 { settings->Pos = ImVec2(x, y); }
+    else if (sscanf(line, "Size=%f,%f", &x, &y) == 2)           { settings->Size = ImMax(ImVec2(x, y), GImGui->Style.WindowMinSize); }
+    else if (sscanf(line, "ViewportId=0x%08X", &u1) == 1)       { settings->ViewportId = u1; }
+    else if (sscanf(line, "ViewportPos=%f,%f", &x, &y) == 2)    { settings->ViewportPos = ImVec2(x, y); }
+    else if (sscanf(line, "Collapsed=%d", &i) == 1)             { settings->Collapsed = (i != 0); }
+    else if (sscanf(line, "DockId=0x%X,%d", &u1, &i) == 2)      { settings->DockId = u1; settings->DockOrder = (short)i; }
+    else if (sscanf(line, "DockId=0x%X", &u1) == 1)             { settings->DockId = u1; settings->DockOrder = -1; }
+    else if (sscanf(line, "ClassId=0x%X", &u1) == 1)            { settings->ClassId = u1; }
+}
+
+static void SettingsHandlerWindow_WriteAll(ImGuiContext* imgui_ctx, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
+{
+    // Gather data from windows that were active during this session
+    // (if a window wasn't opened in this session we preserve its settings)
+    ImGuiContext& g = *imgui_ctx;
+    for (int i = 0; i != g.Windows.Size; i++)
+    {
+        ImGuiWindow* window = g.Windows[i];
+        if (window->Flags & ImGuiWindowFlags_NoSavedSettings)
+            continue;
+
+        ImGuiWindowSettings* settings = (window->SettingsIdx != -1) ? &g.SettingsWindows[window->SettingsIdx] : ImGui::FindWindowSettings(window->ID);
+        if (!settings)
+        {
+            settings = ImGui::CreateNewWindowSettings(window->Name);
+            window->SettingsIdx = g.SettingsWindows.index_from_ptr(settings);
+        }
+        IM_ASSERT(settings->ID == window->ID);
+        settings->Pos = window->Pos - window->ViewportPos;
+        settings->Size = window->SizeFull;
+        settings->ViewportId = window->ViewportId;
+        settings->ViewportPos = window->ViewportPos;
+        IM_ASSERT(window->DockNode == NULL || window->DockNode->ID == window->DockId);
+        settings->DockId = window->DockId;
+        settings->ClassId = window->WindowClass.ClassId;
+        settings->DockOrder = window->DockOrder;
+        settings->Collapsed = window->Collapsed;
+    }
+
+    // Write to text buffer
+    buf->reserve(buf->size() + g.SettingsWindows.Size * 96); // ballpark reserve
+    for (int i = 0; i != g.SettingsWindows.Size; i++)
+    {
+        const ImGuiWindowSettings* settings = &g.SettingsWindows[i];
+        const char* name = settings->Name;
+        if (const char* p = strstr(name, "###"))  // Skip to the "###" marker if any. We don't skip past to match the behavior of GetID()
+            name = p;
+        buf->appendf("[%s][%s]\n", handler->TypeName, name);
+        if (settings->ViewportId != 0 && settings->ViewportId != ImGui::IMGUI_VIEWPORT_DEFAULT_ID)
+        {
+            buf->appendf("ViewportPos=%d,%d\n", (int)settings->ViewportPos.x, (int)settings->ViewportPos.y);
+            buf->appendf("ViewportId=0x%08X\n", settings->ViewportId);
+        }
+        if (settings->Pos.x != 0.0f || settings->Pos.y != 0.0f || settings->ViewportId == ImGui::IMGUI_VIEWPORT_DEFAULT_ID)
+            buf->appendf("Pos=%d,%d\n", (int)settings->Pos.x, (int)settings->Pos.y);
+        if (settings->Size.x != 0.0f || settings->Size.y != 0.0f)
+            buf->appendf("Size=%d,%d\n", (int)settings->Size.x, (int)settings->Size.y);
+        buf->appendf("Collapsed=%d\n", settings->Collapsed);
+        if (settings->DockId != 0)
+        {
+            // Write DockId as 4 digits if possible. Automatic DockId are small numbers, but full explicit DockSpace() are full ImGuiID range.
+            if (settings->DockOrder == -1)
+                buf->appendf("DockId=0x%08X\n", settings->DockId);
+            else
+                buf->appendf("DockId=0x%08X,%d\n", settings->DockId, settings->DockOrder);
+            if (settings->ClassId != 0)
+                buf->appendf("ClassId=0x%08X\n", settings->ClassId);
+        }
+        buf->appendf("\n");
+    }
+}
+
+
+//-----------------------------------------------------------------------------
 // [SECTION] DOCKING
 //-----------------------------------------------------------------------------
 // Docking: Internal Types
@@ -13194,452 +13644,6 @@ static void ImGui::DockSettingsHandler_WriteAll(ImGuiContext* ctx, ImGuiSettings
     buf->appendf("\n");
 }
 
-//-----------------------------------------------------------------------------
-// [SECTION] LOGGING/CAPTURING
-//-----------------------------------------------------------------------------
-// All text output from the interface can be captured into tty/file/clipboard. 
-// By default, tree nodes are automatically opened during logging.
-//-----------------------------------------------------------------------------
-
-// Pass text data straight to log (without being displayed)
-void ImGui::LogText(const char* fmt, ...)
-{
-    ImGuiContext& g = *GImGui;
-    if (!g.LogEnabled)
-        return;
-
-    va_list args;
-    va_start(args, fmt);
-    if (g.LogFile)
-        vfprintf(g.LogFile, fmt, args);
-    else
-        g.LogBuffer.appendfv(fmt, args);
-    va_end(args);
-}
-
-// Internal version that takes a position to decide on newline placement and pad items according to their depth.
-// We split text into individual lines to add current tree level padding
-void ImGui::LogRenderedText(const ImVec2* ref_pos, const char* text, const char* text_end)
-{
-    ImGuiContext& g = *GImGui;
-    ImGuiWindow* window = g.CurrentWindow;
-
-    if (!text_end)
-        text_end = FindRenderedTextEnd(text, text_end);
-
-    const bool log_new_line = ref_pos && (ref_pos->y > g.LogLinePosY + 1);
-    if (ref_pos)
-        g.LogLinePosY = ref_pos->y;
-    if (log_new_line)
-        g.LogLineFirstItem = true;
-
-    const char* text_remaining = text;
-    if (g.LogDepthRef > window->DC.TreeDepth)  // Re-adjust padding if we have popped out of our starting depth
-        g.LogDepthRef = window->DC.TreeDepth;
-    const int tree_depth = (window->DC.TreeDepth - g.LogDepthRef);
-    for (;;)
-    {
-        // Split the string. Each new line (after a '\n') is followed by spacing corresponding to the current depth of our log entry.
-        // We don't add a trailing \n to allow a subsequent item on the same line to be captured.
-        const char* line_start = text_remaining;
-        const char* line_end = ImStreolRange(line_start, text_end);
-        const bool is_first_line = (line_start == text);
-        const bool is_last_line = (line_end == text_end);
-        if (!is_last_line || (line_start != line_end))
-        {
-            const int char_count = (int)(line_end - line_start);
-            if (log_new_line || !is_first_line)
-                LogText(IM_NEWLINE "%*s%.*s", tree_depth * 4, "", char_count, line_start);
-            else if (g.LogLineFirstItem)
-                LogText("%*s%.*s", tree_depth * 4, "", char_count, line_start);
-            else 
-                LogText(" %.*s", char_count, line_start);
-            g.LogLineFirstItem = false;
-        }
-        else if (log_new_line)
-        {
-            // An empty "" string at a different Y position should output a carriage return.
-            LogText(IM_NEWLINE);
-            break;
-        }
-
-        if (is_last_line)
-            break;
-        text_remaining = line_end + 1;
-    }
-}
-
-// Start logging/capturing text output
-void ImGui::LogBegin(ImGuiLogType type, int auto_open_depth)
-{
-    ImGuiContext& g = *GImGui;
-    ImGuiWindow* window = g.CurrentWindow;
-    IM_ASSERT(g.LogEnabled == false);
-    IM_ASSERT(g.LogFile == NULL);
-    IM_ASSERT(g.LogBuffer.empty());
-    g.LogEnabled = true;
-    g.LogType = type;
-    g.LogDepthRef = window->DC.TreeDepth;
-    g.LogDepthToExpand = ((auto_open_depth >= 0) ? auto_open_depth : g.LogDepthToExpandDefault);
-    g.LogLinePosY = FLT_MAX;
-    g.LogLineFirstItem = true;
-}
-
-void ImGui::LogToTTY(int auto_open_depth)
-{
-    ImGuiContext& g = *GImGui;
-    if (g.LogEnabled)
-        return;
-    LogBegin(ImGuiLogType_TTY, auto_open_depth);
-    g.LogFile = stdout;
-}
-
-// Start logging/capturing text output to given file
-void ImGui::LogToFile(int auto_open_depth, const char* filename)
-{
-    ImGuiContext& g = *GImGui;
-    if (g.LogEnabled)
-        return;
-
-    // FIXME: We could probably open the file in text mode "at", however note that clipboard/buffer logging will still 
-    // be subject to outputting OS-incompatible carriage return if within strings the user doesn't use IM_NEWLINE.
-    // By opening the file in binary mode "ab" we have consistent output everywhere.
-    if (!filename)
-        filename = g.IO.LogFilename;
-    if (!filename || !filename[0])
-        return;
-    FILE* f = ImFileOpen(filename, "ab");
-    if (f == NULL)
-    {
-        IM_ASSERT(0);
-        return;
-    }
-
-    LogBegin(ImGuiLogType_File, auto_open_depth);
-    g.LogFile = f;
-}
-
-// Start logging/capturing text output to clipboard
-void ImGui::LogToClipboard(int auto_open_depth)
-{
-    ImGuiContext& g = *GImGui;
-    if (g.LogEnabled)
-        return;
-    LogBegin(ImGuiLogType_Clipboard, auto_open_depth);
-}
-
-void ImGui::LogToBuffer(int auto_open_depth)
-{
-    ImGuiContext& g = *GImGui;
-    if (g.LogEnabled)
-        return;
-    LogBegin(ImGuiLogType_Buffer, auto_open_depth);
-}
-
-void ImGui::LogFinish()
-{
-    ImGuiContext& g = *GImGui;
-    if (!g.LogEnabled)
-        return;
-
-    LogText(IM_NEWLINE);
-    switch (g.LogType)
-    {
-    case ImGuiLogType_TTY:
-        fflush(g.LogFile);
-        break;
-    case ImGuiLogType_File:
-        fclose(g.LogFile);
-        break;
-    case ImGuiLogType_Buffer:
-        break;
-    case ImGuiLogType_Clipboard:
-        if (!g.LogBuffer.empty())
-            SetClipboardText(g.LogBuffer.begin());
-        break;
-    case ImGuiLogType_None:
-        IM_ASSERT(0);
-        break;
-    }
-
-    g.LogEnabled = false;
-    g.LogType = ImGuiLogType_None;
-    g.LogFile = NULL;
-    g.LogBuffer.clear();
-}
-
-// Helper to display logging buttons
-// FIXME-OBSOLETE: We should probably obsolete this and let the user have their own helper (this is one of the oldest function alive!)
-void ImGui::LogButtons()
-{
-    ImGuiContext& g = *GImGui;
-
-    PushID("LogButtons");
-    const bool log_to_tty = Button("Log To TTY"); SameLine();
-    const bool log_to_file = Button("Log To File"); SameLine();
-    const bool log_to_clipboard = Button("Log To Clipboard"); SameLine();
-    PushItemWidth(80.0f);
-    PushAllowKeyboardFocus(false);
-    SliderInt("Default Depth", &g.LogDepthToExpandDefault, 0, 9, NULL);
-    PopAllowKeyboardFocus();
-    PopItemWidth();
-    PopID();
-
-    // Start logging at the end of the function so that the buttons don't appear in the log
-    if (log_to_tty)
-        LogToTTY();
-    if (log_to_file)
-        LogToFile();
-    if (log_to_clipboard)
-        LogToClipboard();
-}
-
-//-----------------------------------------------------------------------------
-// [SECTION] SETTINGS
-//-----------------------------------------------------------------------------
-
-void ImGui::MarkIniSettingsDirty()
-{
-    ImGuiContext& g = *GImGui;
-    if (g.SettingsDirtyTimer <= 0.0f)
-        g.SettingsDirtyTimer = g.IO.IniSavingRate;
-}
-
-void ImGui::MarkIniSettingsDirty(ImGuiWindow* window)
-{
-    ImGuiContext& g = *GImGui;
-    if (!(window->Flags & ImGuiWindowFlags_NoSavedSettings))
-        if (g.SettingsDirtyTimer <= 0.0f)
-            g.SettingsDirtyTimer = g.IO.IniSavingRate;
-}
-
-ImGuiWindowSettings* ImGui::CreateNewWindowSettings(const char* name)
-{
-    ImGuiContext& g = *GImGui;
-    g.SettingsWindows.push_back(ImGuiWindowSettings());
-    ImGuiWindowSettings* settings = &g.SettingsWindows.back();
-    settings->Name = ImStrdup(name);
-    settings->ID = ImHashStr(name, 0);
-    return settings;
-}
-
-ImGuiWindowSettings* ImGui::FindWindowSettings(ImGuiID id)
-{
-    ImGuiContext& g = *GImGui;
-    for (int i = 0; i != g.SettingsWindows.Size; i++)
-        if (g.SettingsWindows[i].ID == id)
-            return &g.SettingsWindows[i];
-    return NULL;
-}
-
-ImGuiWindowSettings* ImGui::FindOrCreateWindowSettings(const char* name)
-{
-    if (ImGuiWindowSettings* settings = FindWindowSettings(ImHashStr(name, 0)))
-        return settings;
-    return CreateNewWindowSettings(name);
-}
-
-void ImGui::LoadIniSettingsFromDisk(const char* ini_filename)
-{
-    size_t file_data_size = 0;
-    char* file_data = (char*)ImFileLoadToMemory(ini_filename, "rb", &file_data_size);
-    if (!file_data)
-        return;
-    LoadIniSettingsFromMemory(file_data, (size_t)file_data_size);
-    ImGui::MemFree(file_data);
-}
-
-ImGuiSettingsHandler* ImGui::FindSettingsHandler(const char* type_name)
-{
-    ImGuiContext& g = *GImGui;
-    const ImGuiID type_hash = ImHashStr(type_name, 0);
-    for (int handler_n = 0; handler_n < g.SettingsHandlers.Size; handler_n++)
-        if (g.SettingsHandlers[handler_n].TypeHash == type_hash)
-            return &g.SettingsHandlers[handler_n];
-    return NULL;
-}
-
-// Zero-tolerance, no error reporting, cheap .ini parsing
-void ImGui::LoadIniSettingsFromMemory(const char* ini_data, size_t ini_size)
-{
-    ImGuiContext& g = *GImGui;
-    IM_ASSERT(g.Initialized);
-    IM_ASSERT(g.SettingsLoaded == false && g.FrameCount == 0);
-
-    // For user convenience, we allow passing a non zero-terminated string (hence the ini_size parameter).
-    // For our convenience and to make the code simpler, we'll also write zero-terminators within the buffer. So let's create a writable copy..
-    if (ini_size == 0)
-        ini_size = strlen(ini_data);
-    char* buf = (char*)ImGui::MemAlloc(ini_size + 1);
-    char* buf_end = buf + ini_size;
-    memcpy(buf, ini_data, ini_size);
-    buf[ini_size] = 0;
-
-    void* entry_data = NULL;
-    ImGuiSettingsHandler* entry_handler = NULL;
-
-    char* line_end = NULL;
-    for (char* line = buf; line < buf_end; line = line_end + 1)
-    {
-        // Skip new lines markers, then find end of the line
-        while (*line == '\n' || *line == '\r')
-            line++;
-        line_end = line;
-        while (line_end < buf_end && *line_end != '\n' && *line_end != '\r')
-            line_end++;
-        line_end[0] = 0;
-        if (line[0] == ';')
-            continue;
-        if (line[0] == '[' && line_end > line && line_end[-1] == ']')
-        {
-            // Parse "[Type][Name]". Note that 'Name' can itself contains [] characters, which is acceptable with the current format and parsing code.
-            line_end[-1] = 0;
-            const char* name_end = line_end - 1;
-            const char* type_start = line + 1;
-            char* type_end = (char*)(intptr_t)ImStrchrRange(type_start, name_end, ']');
-            const char* name_start = type_end ? ImStrchrRange(type_end + 1, name_end, '[') : NULL;
-            if (!type_end || !name_start)
-            {
-                name_start = type_start; // Import legacy entries that have no type
-                type_start = "Window";
-            }
-            else
-            {
-                *type_end = 0; // Overwrite first ']'
-                name_start++;  // Skip second '['
-            }
-            entry_handler = FindSettingsHandler(type_start);
-            entry_data = entry_handler ? entry_handler->ReadOpenFn(&g, entry_handler, name_start) : NULL;
-        }
-        else if (entry_handler != NULL && entry_data != NULL)
-        {
-            // Let type handler parse the line
-            entry_handler->ReadLineFn(&g, entry_handler, entry_data, line);
-        }
-    }
-    ImGui::MemFree(buf);
-    g.SettingsLoaded = true;
-    DockContextOnLoadSettings(&g);
-}
-
-void ImGui::SaveIniSettingsToDisk(const char* ini_filename)
-{
-    ImGuiContext& g = *GImGui;
-    g.SettingsDirtyTimer = 0.0f;
-    if (!ini_filename)
-        return;
-
-    size_t ini_data_size = 0;
-    const char* ini_data = SaveIniSettingsToMemory(&ini_data_size);
-    FILE* f = ImFileOpen(ini_filename, "wt");
-    if (!f)
-        return;
-    fwrite(ini_data, sizeof(char), ini_data_size, f);
-    fclose(f);
-}
-
-// Call registered handlers (e.g. SettingsHandlerWindow_WriteAll() + custom handlers) to write their stuff into a text buffer
-const char* ImGui::SaveIniSettingsToMemory(size_t* out_size)
-{
-    ImGuiContext& g = *GImGui;
-    g.SettingsDirtyTimer = 0.0f;
-    g.SettingsIniData.Buf.resize(0);
-    g.SettingsIniData.Buf.push_back(0);
-    for (int handler_n = 0; handler_n < g.SettingsHandlers.Size; handler_n++)
-    {
-        ImGuiSettingsHandler* handler = &g.SettingsHandlers[handler_n];
-        handler->WriteAllFn(&g, handler, &g.SettingsIniData);
-    }
-    if (out_size)
-        *out_size = (size_t)g.SettingsIniData.size();
-    return g.SettingsIniData.c_str();
-}
-
-static void* SettingsHandlerWindow_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
-{
-    ImGuiWindowSettings* settings = ImGui::FindWindowSettings(ImHashStr(name, 0));
-    if (!settings)
-        settings = ImGui::CreateNewWindowSettings(name);
-    return (void*)settings;
-}
-
-static void SettingsHandlerWindow_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line)
-{
-    ImGuiWindowSettings* settings = (ImGuiWindowSettings*)entry;
-    float x, y;
-    int i;
-    ImU32 u1;
-    if (sscanf(line, "Pos=%f,%f", &x, &y) == 2)                 { settings->Pos = ImVec2(x, y); }
-    else if (sscanf(line, "Size=%f,%f", &x, &y) == 2)           { settings->Size = ImMax(ImVec2(x, y), GImGui->Style.WindowMinSize); }
-    else if (sscanf(line, "ViewportId=0x%08X", &u1) == 1)       { settings->ViewportId = u1; }
-    else if (sscanf(line, "ViewportPos=%f,%f", &x, &y) == 2)    { settings->ViewportPos = ImVec2(x, y); }
-    else if (sscanf(line, "Collapsed=%d", &i) == 1)             { settings->Collapsed = (i != 0); }
-    else if (sscanf(line, "DockId=0x%X,%d", &u1, &i) == 2)      { settings->DockId = u1; settings->DockOrder = (short)i; }
-    else if (sscanf(line, "DockId=0x%X", &u1) == 1)             { settings->DockId = u1; settings->DockOrder = -1; }
-    else if (sscanf(line, "ClassId=0x%X", &u1) == 1)            { settings->ClassId = u1; }
-}
-
-static void SettingsHandlerWindow_WriteAll(ImGuiContext* imgui_ctx, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
-{
-    // Gather data from windows that were active during this session
-    // (if a window wasn't opened in this session we preserve its settings)
-    ImGuiContext& g = *imgui_ctx;
-    for (int i = 0; i != g.Windows.Size; i++)
-    {
-        ImGuiWindow* window = g.Windows[i];
-        if (window->Flags & ImGuiWindowFlags_NoSavedSettings)
-            continue;
-
-        ImGuiWindowSettings* settings = (window->SettingsIdx != -1) ? &g.SettingsWindows[window->SettingsIdx] : ImGui::FindWindowSettings(window->ID);
-        if (!settings)
-        {
-            settings = ImGui::CreateNewWindowSettings(window->Name);
-            window->SettingsIdx = g.SettingsWindows.index_from_ptr(settings);
-        }
-        IM_ASSERT(settings->ID == window->ID);
-        settings->Pos = window->Pos - window->ViewportPos;
-        settings->Size = window->SizeFull;
-        settings->ViewportId = window->ViewportId;
-        settings->ViewportPos = window->ViewportPos;
-        IM_ASSERT(window->DockNode == NULL || window->DockNode->ID == window->DockId);
-        settings->DockId = window->DockId;
-        settings->ClassId = window->WindowClass.ClassId;
-        settings->DockOrder = window->DockOrder;
-        settings->Collapsed = window->Collapsed;
-    }
-
-    // Write to text buffer
-    buf->reserve(buf->size() + g.SettingsWindows.Size * 96); // ballpark reserve
-    for (int i = 0; i != g.SettingsWindows.Size; i++)
-    {
-        const ImGuiWindowSettings* settings = &g.SettingsWindows[i];
-        const char* name = settings->Name;
-        if (const char* p = strstr(name, "###"))  // Skip to the "###" marker if any. We don't skip past to match the behavior of GetID()
-            name = p;
-        buf->appendf("[%s][%s]\n", handler->TypeName, name);
-        if (settings->ViewportId != 0 && settings->ViewportId != ImGui::IMGUI_VIEWPORT_DEFAULT_ID)
-        {
-            buf->appendf("ViewportPos=%d,%d\n", (int)settings->ViewportPos.x, (int)settings->ViewportPos.y);
-            buf->appendf("ViewportId=0x%08X\n", settings->ViewportId);
-        }
-        if (settings->Pos.x != 0.0f || settings->Pos.y != 0.0f || settings->ViewportId == ImGui::IMGUI_VIEWPORT_DEFAULT_ID)
-            buf->appendf("Pos=%d,%d\n", (int)settings->Pos.x, (int)settings->Pos.y);
-        if (settings->Size.x != 0.0f || settings->Size.y != 0.0f)
-            buf->appendf("Size=%d,%d\n", (int)settings->Size.x, (int)settings->Size.y);
-        buf->appendf("Collapsed=%d\n", settings->Collapsed);
-        if (settings->DockId != 0)
-        {
-            // Write DockId as 4 digits if possible. Automatic DockId are small numbers, but full explicit DockSpace() are full ImGuiID range.
-            if (settings->DockOrder == -1)
-                buf->appendf("DockId=0x%08X\n", settings->DockId);
-            else
-                buf->appendf("DockId=0x%08X,%d\n", settings->DockId, settings->DockOrder);
-            if (settings->ClassId != 0)
-                buf->appendf("ClassId=0x%08X\n", settings->ClassId);
-        }
-        buf->appendf("\n");
-    }
-}
 
 //-----------------------------------------------------------------------------
 // [SECTION] PLATFORM DEPENDENT HELPERS
