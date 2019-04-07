@@ -14,6 +14,8 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
+//  2019-04-04: Vulkan: Avoid passing negative coordinates to vkCmdSetScissor, which debug validation layers do not like.
+//  2019-04-01: Vulkan: Support for 32-bit index buffer (#define ImDrawIdx unsigned int).
 //  2019-02-16: Vulkan: Viewport and clipping rectangles correctly using draw_data->FramebufferScale to allow retina display.
 //  2018-11-30: Misc: Setting up io.BackendRendererName so it can be displayed in the About Window.
 //  2018-08-25: Vulkan: Fixed mishandled VkSurfaceCapabilitiesKHR::maxImageCount=0 case.
@@ -80,6 +82,23 @@ static void ImGui_ImplVulkan_ShutdownPlatformInterface();
 
 // glsl_shader.vert, compiled with:
 // # glslangValidator -V -x -o glsl_shader.vert.u32 glsl_shader.vert
+/*
+#version 450 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
+layout(push_constant) uniform uPushConstant { vec2 uScale; vec2 uTranslate; } pc;
+
+out gl_PerVertex { vec4 gl_Position; };
+layout(location = 0) out struct { vec4 Color; vec2 UV; } Out;
+
+void main()
+{
+    Out.Color = aColor;
+    Out.UV = aUV;
+    gl_Position = vec4(aPos * pc.uScale + pc.uTranslate, 0, 1);
+}
+*/
 static uint32_t __glsl_shader_vert_spv[] =
 {
     0x07230203,0x00010000,0x00080001,0x0000002e,0x00000000,0x00020011,0x00000001,0x0006000b,
@@ -127,6 +146,16 @@ static uint32_t __glsl_shader_vert_spv[] =
 
 // glsl_shader.frag, compiled with:
 // # glslangValidator -V -x -o glsl_shader.frag.u32 glsl_shader.frag
+/*
+#version 450 core
+layout(location = 0) out vec4 fColor;
+layout(set=0, binding=0) uniform sampler2D sTexture;
+layout(location = 0) in struct { vec4 Color; vec2 UV; } In;
+void main()
+{
+    fColor = In.Color * texture(sTexture, In.UV.st);
+}
+*/
 static uint32_t __glsl_shader_frag_spv[] =
 {
     0x07230203,0x00010000,0x00080001,0x0000001e,0x00000000,0x00020011,0x00000001,0x0006000b,
@@ -216,17 +245,17 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
 
     VkResult err;
     FrameDataForRender* fd = &g_FramesDataBuffers[g_FrameIndex];
-    g_FrameIndex = (g_FrameIndex + 1) % IMGUI_VK_QUEUED_FRAMES;
+    g_FrameIndex = (g_FrameIndex + 1) % IM_ARRAYSIZE(g_FramesDataBuffers);
 
     // Create the Vertex and Index buffers:
     size_t vertex_size = draw_data->TotalVtxCount * sizeof(ImDrawVert);
     size_t index_size = draw_data->TotalIdxCount * sizeof(ImDrawIdx);
-    if (!fd->VertexBuffer || fd->VertexBufferSize < vertex_size)
+    if (fd->VertexBuffer == VK_NULL_HANDLE || fd->VertexBufferSize < vertex_size)
         CreateOrResizeBuffer(fd->VertexBuffer, fd->VertexBufferMemory, fd->VertexBufferSize, vertex_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    if (!fd->IndexBuffer || fd->IndexBufferSize < index_size)
+    if (fd->IndexBuffer == VK_NULL_HANDLE || fd->IndexBufferSize < index_size)
         CreateOrResizeBuffer(fd->IndexBuffer, fd->IndexBufferMemory, fd->IndexBufferSize, index_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
-    // Upload Vertex and index Data:
+    // Upload vertex/index data into a single contiguous GPU buffer
     {
         ImDrawVert* vtx_dst = NULL;
         ImDrawIdx* idx_dst = NULL;
@@ -267,7 +296,7 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
         VkBuffer vertex_buffers[1] = { fd->VertexBuffer };
         VkDeviceSize vertex_offset[1] = { 0 };
         vkCmdBindVertexBuffers(command_buffer, 0, 1, vertex_buffers, vertex_offset);
-        vkCmdBindIndexBuffer(command_buffer, fd->IndexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindIndexBuffer(command_buffer, fd->IndexBuffer, 0, sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     }
 
     // Setup viewport:
@@ -310,6 +339,7 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
             const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
             if (pcmd->UserCallback)
             {
+                // User callback (registered via ImDrawList::AddCallback)
                 pcmd->UserCallback(cmd_list, pcmd);
             }
             else
@@ -323,6 +353,12 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
 
                 if (clip_rect.x < fb_width && clip_rect.y < fb_height && clip_rect.z >= 0.0f && clip_rect.w >= 0.0f)
                 {
+                    // Negative offsets are illegal for vkCmdSetScissor
+                    if (clip_rect.x < 0.0f)
+                        clip_rect.x = 0.0f;
+                    if (clip_rect.y < 0.0f)
+                        clip_rect.y = 0.0f;
+
                     // Apply scissor/clipping rectangle
                     VkRect2D scissor;
                     scissor.offset.x = (int32_t)(clip_rect.x);
@@ -697,7 +733,7 @@ void    ImGui_ImplVulkan_InvalidateDeviceObjects()
 {
     ImGui_ImplVulkan_InvalidateFontUploadObjects();
 
-    for (int i = 0; i < IMGUI_VK_QUEUED_FRAMES; i++)
+    for (int i = 0; i < IM_ARRAYSIZE(g_FramesDataBuffers); i++)
     {
         FrameDataForRender* fd = &g_FramesDataBuffers[i];
         if (fd->VertexBuffer)       { vkDestroyBuffer   (g_Device, fd->VertexBuffer,        g_Allocator); fd->VertexBuffer = VK_NULL_HANDLE; }
@@ -876,7 +912,7 @@ void ImGui_ImplVulkanH_CreateWindowDataCommandBuffers(VkPhysicalDevice physical_
 
     // Create Command Buffers
     VkResult err;
-    for (int i = 0; i < IMGUI_VK_QUEUED_FRAMES; i++)
+    for (int i = 0; i < IM_ARRAYSIZE(wd->Frames); i++)
     {
         ImGui_ImplVulkanH_FrameData* fd = &wd->Frames[i];
         {
@@ -928,7 +964,7 @@ int ImGui_ImplVulkanH_GetMinImageCountFromPresentMode(VkPresentModeKHR present_m
 
 void ImGui_ImplVulkanH_CreateWindowDataSwapChainAndFramebuffer(VkPhysicalDevice physical_device, VkDevice device, ImGui_ImplVulkanH_WindowData* wd, const VkAllocationCallbacks* allocator, int w, int h)
 {
-    uint32_t min_image_count = 2;	// FIXME: this should become a function parameter
+    uint32_t min_image_count = 2;   // FIXME: this should become a function parameter
 
     VkResult err;
     VkSwapchainKHR old_swapchain = wd->Swapchain;
@@ -956,7 +992,7 @@ void ImGui_ImplVulkanH_CreateWindowDataSwapChainAndFramebuffer(VkPhysicalDevice 
         VkSwapchainCreateInfoKHR info = {};
         info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
         info.surface = wd->Surface;
-		info.minImageCount = min_image_count;
+        info.minImageCount = min_image_count;
         info.imageFormat = wd->SurfaceFormat.format;
         info.imageColorSpace = wd->SurfaceFormat.colorSpace;
         info.imageArrayLayers = 1;
@@ -971,9 +1007,9 @@ void ImGui_ImplVulkanH_CreateWindowDataSwapChainAndFramebuffer(VkPhysicalDevice 
         err = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, wd->Surface, &cap);
         check_vk_result(err);
         if (info.minImageCount < cap.minImageCount)
-			info.minImageCount = cap.minImageCount;
-		else if (cap.maxImageCount != 0 && info.minImageCount > cap.maxImageCount)
-			info.minImageCount = cap.maxImageCount;
+            info.minImageCount = cap.minImageCount;
+        else if (cap.maxImageCount != 0 && info.minImageCount > cap.maxImageCount)
+            info.minImageCount = cap.maxImageCount;
 
         if (cap.currentExtent.width == 0xffffffff)
         {
@@ -1077,7 +1113,7 @@ void ImGui_ImplVulkanH_DestroyWindowData(VkInstance instance, VkDevice device, I
     vkDeviceWaitIdle(device); // FIXME: We could wait on the Queue if we had the queue in wd-> (otherwise VulkanH functions can't use globals)
     //vkQueueWaitIdle(g_Queue);
 
-    for (int i = 0; i < IMGUI_VK_QUEUED_FRAMES; i++)
+    for (int i = 0; i < IM_ARRAYSIZE(wd->Frames); i++)
     {
         ImGui_ImplVulkanH_FrameData* fd = &wd->Frames[i];
         vkDestroyFence(device, fd->Fence, allocator);
