@@ -5,7 +5,7 @@
 // Newcomers, read 'Programmer guide' below for notes on how to setup Dear ImGui in your codebase.
 // Get latest version at https://github.com/ocornut/imgui
 // Releases change-log at https://github.com/ocornut/imgui/releases
-// Technical Support for Getting Started https://discourse.dearimgui.org/c/getting-started
+// Technical Support for Getting Started https://github.com/ocornut/imgui/wiki
 // Gallery (please post your screenshots/video there!): https://github.com/ocornut/imgui/issues/2847
 
 // Developed by Omar Cornut and every direct or indirect contributors to the GitHub.
@@ -860,9 +860,9 @@ static void             AddDrawListToDrawData(ImVector<ImDrawList*>* out_list, I
 static void             AddWindowToSortBuffer(ImVector<ImGuiWindow*>* out_sorted_windows, ImGuiWindow* window);
 
 // Settings
-static void*            SettingsHandlerWindow_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name);
-static void             SettingsHandlerWindow_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line);
-static void             SettingsHandlerWindow_WriteAll(ImGuiContext* imgui_ctx, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf);
+static void*            WindowSettingsHandler_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name);
+static void             WindowSettingsHandler_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line);
+static void             WindowSettingsHandler_WriteAll(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* buf);
 
 // Platform Dependents default implementation for IO functions
 static const char*      GetClipboardTextFn_DefaultImpl(void* user_data);
@@ -1407,7 +1407,7 @@ ImU32 ImHashStr(const char* data_p, size_t data_size, ImU32 seed)
 
 FILE* ImFileOpen(const char* filename, const char* mode)
 {
-#if defined(_WIN32) && !defined(__CYGWIN__) && !defined(__GNUC__)
+#if defined(_WIN32) && !defined(IMGUI_DISABLE_WIN32_FUNCTIONS) && !defined(__CYGWIN__) && !defined(__GNUC__)
     // We need a fopen() wrapper because MSVC/Windows fopen doesn't handle UTF-8 filenames. Converting both strings from UTF-8 to wchar format (using a single allocation, because we can)
     const int filename_wsize = ImTextCountCharsFromUtf8(filename, NULL) + 1;
     const int mode_wsize = ImTextCountCharsFromUtf8(mode, NULL) + 1;
@@ -2569,7 +2569,7 @@ ImGuiWindow::ImGuiWindow(ImGuiContext* context, const char* name)
     LastTimeActive = -1.0f;
     ItemWidthDefault = 0.0f;
     FontWindowScale = FontDpiScale = 1.0f;
-    SettingsIdx = -1;
+    SettingsOffset = -1;
 
     DrawList = &DrawListInst;
     DrawList->_OwnerName = Name;
@@ -3972,13 +3972,15 @@ void ImGui::Initialize(ImGuiContext* context)
     IM_ASSERT(!g.Initialized && !g.SettingsLoaded);
 
     // Add .ini handle for ImGuiWindow type
-    ImGuiSettingsHandler ini_handler;
-    ini_handler.TypeName = "Window";
-    ini_handler.TypeHash = ImHashStr("Window");
-    ini_handler.ReadOpenFn = SettingsHandlerWindow_ReadOpen;
-    ini_handler.ReadLineFn = SettingsHandlerWindow_ReadLine;
-    ini_handler.WriteAllFn = SettingsHandlerWindow_WriteAll;
-    g.SettingsHandlers.push_back(ini_handler);
+    {
+        ImGuiSettingsHandler ini_handler;
+        ini_handler.TypeName = "Window";
+        ini_handler.TypeHash = ImHashStr("Window");
+        ini_handler.ReadOpenFn = WindowSettingsHandler_ReadOpen;
+        ini_handler.ReadLineFn = WindowSettingsHandler_ReadLine;
+        ini_handler.WriteAllFn = WindowSettingsHandler_WriteAll;
+        g.SettingsHandlers.push_back(ini_handler);
+    }
 
     // Create default viewport
     ImGuiViewportP* viewport = IM_NEW(ImGuiViewportP)();
@@ -4062,8 +4064,6 @@ void ImGui::Shutdown(ImGuiContext* context)
     g.PrivateClipboard.clear();
     g.InputTextState.ClearFreeMemory();
 
-    for (int i = 0; i < g.SettingsWindows.Size; i++)
-        IM_DELETE(g.SettingsWindows[i].Name);
     g.SettingsWindows.clear();
     g.SettingsHandlers.clear();
 
@@ -4821,6 +4821,12 @@ bool ImGui::IsItemClicked(int mouse_button)
     return IsMouseClicked(mouse_button) && IsItemHovered(ImGuiHoveredFlags_None);
 }
 
+bool ImGui::IsItemToggledOpen()
+{
+    ImGuiContext& g = *GImGui;
+    return (g.CurrentWindow->DC.LastItemStatusFlags & ImGuiItemStatusFlags_ToggledOpen) ? true : false;
+}
+
 bool ImGui::IsItemToggledSelection()
 {
     ImGuiContext& g = *GImGui;
@@ -5062,7 +5068,7 @@ static ImGuiWindow* CreateNewWindow(const char* name, ImVec2 size, ImGuiWindowFl
         if (ImGuiWindowSettings* settings = ImGui::FindWindowSettings(window->ID))
         {
             // Retrieve settings from .ini file
-            window->SettingsIdx = g.SettingsWindows.index_from_ptr(settings);
+            window->SettingsOffset = g.SettingsWindows.offset_from_ptr(settings);
             SetWindowConditionAllowFlags(window, ImGuiCond_FirstUseEver, false);
             if (settings->ViewportId)
             {
@@ -5134,8 +5140,8 @@ static ImVec2 CalcWindowSizeAfterConstraint(ImGuiWindow* window, ImVec2 new_size
             g.NextWindowData.SizeCallback(&data);
             new_size = data.DesiredSize;
         }
-        new_size.x = ImFloor(new_size.x);
-        new_size.y = ImFloor(new_size.y);
+        new_size.x = IM_FLOOR(new_size.x);
+        new_size.y = IM_FLOOR(new_size.y);
     }
 
     // Minimum size
@@ -6289,14 +6295,14 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
         window->WorkRect.Max.x = window->WorkRect.Min.x + work_rect_size_x;
         window->WorkRect.Max.y = window->WorkRect.Min.y + work_rect_size_y;
 
-        // [LEGACY] Contents Region
-        // FIXME-OBSOLETE: window->ContentsRegionRect.Max is currently very misleading / partly faulty, but some BeginChild() patterns relies on it.
+        // [LEGACY] Content Region
+        // FIXME-OBSOLETE: window->ContentRegionRect.Max is currently very misleading / partly faulty, but some BeginChild() patterns relies on it.
         // Used by:
         // - Mouse wheel scrolling + many other things
-        window->ContentsRegionRect.Min.x = window->Pos.x - window->Scroll.x + window->WindowPadding.x;
-        window->ContentsRegionRect.Min.y = window->Pos.y - window->Scroll.y + window->WindowPadding.y + decoration_up_height;
-        window->ContentsRegionRect.Max.x = window->ContentsRegionRect.Min.x + (window->ContentSizeExplicit.x != 0.0f ? window->ContentSizeExplicit.x : (window->Size.x - window->WindowPadding.x * 2.0f - window->ScrollbarSizes.x));
-        window->ContentsRegionRect.Max.y = window->ContentsRegionRect.Min.y + (window->ContentSizeExplicit.y != 0.0f ? window->ContentSizeExplicit.y : (window->Size.y - window->WindowPadding.y * 2.0f - decoration_up_height - window->ScrollbarSizes.y));
+        window->ContentRegionRect.Min.x = window->Pos.x - window->Scroll.x + window->WindowPadding.x;
+        window->ContentRegionRect.Min.y = window->Pos.y - window->Scroll.y + window->WindowPadding.y + decoration_up_height;
+        window->ContentRegionRect.Max.x = window->ContentRegionRect.Min.x + (window->ContentSizeExplicit.x != 0.0f ? window->ContentSizeExplicit.x : (window->Size.x - window->WindowPadding.x * 2.0f - window->ScrollbarSizes.x));
+        window->ContentRegionRect.Max.y = window->ContentRegionRect.Min.y + (window->ContentSizeExplicit.y != 0.0f ? window->ContentSizeExplicit.y : (window->Size.y - window->WindowPadding.y * 2.0f - decoration_up_height - window->ScrollbarSizes.y));
 
         // Setup drawing context
         // (NB: That term "drawing context / DC" lost its meaning a long time ago. Initially was meant to hold transient data only. Nowadays difference between window-> and window->DC-> is dubious.)
@@ -7139,7 +7145,7 @@ void ImGui::SetWindowSize(ImGuiWindow* window, const ImVec2& size, ImGuiCond con
     if (size.x > 0.0f)
     {
         window->AutoFitFramesX = 0;
-        window->SizeFull.x = ImFloor(size.x);
+        window->SizeFull.x = IM_FLOOR(size.x);
     }
     else
     {
@@ -7149,7 +7155,7 @@ void ImGui::SetWindowSize(ImGuiWindow* window, const ImVec2& size, ImGuiCond con
     if (size.y > 0.0f)
     {
         window->AutoFitFramesY = 0;
-        window->SizeFull.y = ImFloor(size.y);
+        window->SizeFull.y = IM_FLOOR(size.y);
     }
     else
     {
@@ -7316,7 +7322,7 @@ ImVec2 ImGui::GetContentRegionMax()
 {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
-    ImVec2 mx = window->ContentsRegionRect.Max - window->Pos;
+    ImVec2 mx = window->ContentRegionRect.Max - window->Pos;
     if (window->DC.CurrentColumns)
         mx.x = window->WorkRect.Max.x - window->Pos.x;
     return mx;
@@ -7327,7 +7333,7 @@ ImVec2 ImGui::GetContentRegionMaxAbs()
 {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
-    ImVec2 mx = window->ContentsRegionRect.Max;
+    ImVec2 mx = window->ContentRegionRect.Max;
     if (window->DC.CurrentColumns)
         mx.x = window->WorkRect.Max.x;
     return mx;
@@ -7343,19 +7349,19 @@ ImVec2 ImGui::GetContentRegionAvail()
 ImVec2 ImGui::GetWindowContentRegionMin()
 {
     ImGuiWindow* window = GImGui->CurrentWindow;
-    return window->ContentsRegionRect.Min - window->Pos;
+    return window->ContentRegionRect.Min - window->Pos;
 }
 
 ImVec2 ImGui::GetWindowContentRegionMax()
 {
     ImGuiWindow* window = GImGui->CurrentWindow;
-    return window->ContentsRegionRect.Max - window->Pos;
+    return window->ContentRegionRect.Max - window->Pos;
 }
 
 float ImGui::GetWindowContentRegionWidth()
 {
     ImGuiWindow* window = GImGui->CurrentWindow;
-    return window->ContentsRegionRect.GetWidth();
+    return window->ContentRegionRect.GetWidth();
 }
 
 float ImGui::GetTextLineHeight()
@@ -7391,8 +7397,7 @@ ImDrawList* ImGui::GetWindowDrawList()
 float ImGui::GetWindowDpiScale()
 {
     ImGuiContext& g = *GImGui;
-    IM_ASSERT(g.CurrentViewport != NULL);
-    return g.CurrentViewport->DpiScale;
+    return g.CurrentDpiScale;
 }
 
 ImGuiViewport* ImGui::GetWindowViewport()
@@ -9022,7 +9027,7 @@ static void ImGui::NavUpdate()
     {
         // *Fallback* manual-scroll with Nav directional keys when window has no navigable item
         ImGuiWindow* window = g.NavWindow;
-        const float scroll_speed = ImFloor(window->CalcFontSize() * 100 * g.IO.DeltaTime + 0.5f); // We need round the scrolling speed because sub-pixel scroll isn't reliably supported.
+        const float scroll_speed = IM_ROUND(window->CalcFontSize() * 100 * g.IO.DeltaTime); // We need round the scrolling speed because sub-pixel scroll isn't reliably supported.
         if (window->DC.NavLayerActiveMask == 0x00 && window->DC.NavHasScroll && g.NavMoveRequest)
         {
             if (g.NavMoveDir == ImGuiDir_Left || g.NavMoveDir == ImGuiDir_Right)
@@ -9964,25 +9969,31 @@ void ImGui::MarkIniSettingsDirty(ImGuiWindow* window)
 ImGuiWindowSettings* ImGui::CreateNewWindowSettings(const char* name)
 {
     ImGuiContext& g = *GImGui;
-    g.SettingsWindows.push_back(ImGuiWindowSettings());
-    ImGuiWindowSettings* settings = &g.SettingsWindows.back();
+
 #if !IMGUI_DEBUG_INI_SETTINGS
     // Skip to the "###" marker if any. We don't skip past to match the behavior of GetID()
     // Preserve the full string when IMGUI_DEBUG_INI_SETTINGS is set to make .ini inspection easier.
     if (const char* p = strstr(name, "###"))
         name = p;
 #endif
-    settings->Name = ImStrdup(name);
-    settings->ID = ImHashStr(name);
+    const size_t name_len = strlen(name);
+
+    // Allocate chunk
+    const size_t chunk_size = sizeof(ImGuiWindowSettings) + name_len + 1;
+    ImGuiWindowSettings* settings = g.SettingsWindows.alloc_chunk(chunk_size);
+    IM_PLACEMENT_NEW(settings) ImGuiWindowSettings();
+    settings->ID = ImHashStr(name, name_len);
+    memcpy(settings->GetName(), name, name_len + 1);   // Store with zero terminator
+
     return settings;
 }
 
 ImGuiWindowSettings* ImGui::FindWindowSettings(ImGuiID id)
 {
     ImGuiContext& g = *GImGui;
-    for (int i = 0; i != g.SettingsWindows.Size; i++)
-        if (g.SettingsWindows[i].ID == id)
-            return &g.SettingsWindows[i];
+    for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
+        if (settings->ID == id)
+            return settings;
     return NULL;
 }
 
@@ -10109,7 +10120,7 @@ const char* ImGui::SaveIniSettingsToMemory(size_t* out_size)
     return g.SettingsIniData.c_str();
 }
 
-static void* SettingsHandlerWindow_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
+static void* WindowSettingsHandler_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
 {
     ImGuiWindowSettings* settings = ImGui::FindWindowSettings(ImHashStr(name));
     if (!settings)
@@ -10117,7 +10128,7 @@ static void* SettingsHandlerWindow_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*
     return (void*)settings;
 }
 
-static void SettingsHandlerWindow_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line)
+static void WindowSettingsHandler_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line)
 {
     ImGuiWindowSettings* settings = (ImGuiWindowSettings*)entry;
     int x, y;
@@ -10133,7 +10144,7 @@ static void SettingsHandlerWindow_ReadLine(ImGuiContext*, ImGuiSettingsHandler*,
     else if (sscanf(line, "ClassId=0x%X", &u1) == 1)            { settings->ClassId = u1; }
 }
 
-static void SettingsHandlerWindow_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
+static void WindowSettingsHandler_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
 {
     // Gather data from windows that were active during this session
     // (if a window wasn't opened in this session we preserve its settings)
@@ -10144,11 +10155,11 @@ static void SettingsHandlerWindow_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandl
         if (window->Flags & ImGuiWindowFlags_NoSavedSettings)
             continue;
 
-        ImGuiWindowSettings* settings = (window->SettingsIdx != -1) ? &g.SettingsWindows[window->SettingsIdx] : ImGui::FindWindowSettings(window->ID);
+        ImGuiWindowSettings* settings = (window->SettingsOffset != -1) ? g.SettingsWindows.ptr_from_offset(window->SettingsOffset) : ImGui::FindWindowSettings(window->ID);
         if (!settings)
         {
             settings = ImGui::CreateNewWindowSettings(window->Name);
-            window->SettingsIdx = g.SettingsWindows.index_from_ptr(settings);
+            window->SettingsOffset = g.SettingsWindows.offset_from_ptr(settings);
         }
         IM_ASSERT(settings->ID == window->ID);
         settings->Pos = ImVec2ih(window->Pos - window->ViewportPos);
@@ -10163,11 +10174,11 @@ static void SettingsHandlerWindow_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandl
     }
 
     // Write to text buffer
-    buf->reserve(buf->size() + g.SettingsWindows.Size * 96); // ballpark reserve
-    for (int i = 0; i != g.SettingsWindows.Size; i++)
+    buf->reserve(buf->size() + g.SettingsWindows.size() * 6); // ballpark reserve
+    for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
     {
-        const ImGuiWindowSettings* settings = &g.SettingsWindows[i];
-        buf->appendf("[%s][%s]\n", handler->TypeName, settings->Name);
+        const char* settings_name = settings->GetName();
+        buf->appendf("[%s][%s]\n", handler->TypeName, settings_name);
         if (settings->ViewportId != 0 && settings->ViewportId != ImGui::IMGUI_VIEWPORT_DEFAULT_ID)
         {
             buf->appendf("ViewportPos=%d,%d\n", settings->ViewportPos.x, settings->ViewportPos.y);
@@ -10188,7 +10199,7 @@ static void SettingsHandlerWindow_WriteAll(ImGuiContext* ctx, ImGuiSettingsHandl
             if (settings->ClassId != 0)
                 buf->appendf("ClassId=0x%08X\n", settings->ClassId);
         }
-        buf->appendf("\n");
+        buf->append("\n");
     }
 }
 
@@ -10253,6 +10264,7 @@ void ImGui::SetCurrentViewport(ImGuiWindow* current_window, ImGuiViewportP* view
         viewport->LastFrameActive = g.FrameCount;
     if (g.CurrentViewport == viewport)
         return;
+    g.CurrentDpiScale = viewport ? viewport->DpiScale : 1.0f;
     g.CurrentViewport = viewport;
     //IMGUI_DEBUG_LOG_VIEWPORT("SetCurrentViewport changed '%s' 0x%08X\n", current_window ? current_window->Name : NULL, viewport ? viewport->ID : 0);
 
@@ -10408,6 +10420,7 @@ static void ImGui::UpdateViewportsNewFrame()
         main_viewport_platform_pos = (main_viewport->Flags & ImGuiViewportFlags_Minimized) ? main_viewport->Pos : g.PlatformIO.Platform_GetWindowPos(main_viewport);
     AddUpdateViewport(NULL, IMGUI_VIEWPORT_DEFAULT_ID, main_viewport_platform_pos, main_viewport_platform_size, ImGuiViewportFlags_CanHostOtherWindows);
 
+    g.CurrentDpiScale = 0.0f;
     g.CurrentViewport = NULL;
     g.MouseViewport = NULL;
     for (int n = 0; n < g.Viewports.Size; n++)
@@ -11415,8 +11428,8 @@ static void ImGui::DockContextPruneUnusedSettingsNodes(ImGuiContext* ctx)
 
     // Count reference to dock ids from window settings
     // We guard against the possibility of an invalid .ini file (RootID may point to a missing node)
-    for (int settings_n = 0; settings_n < g.SettingsWindows.Size; settings_n++)
-        if (ImGuiID dock_id = g.SettingsWindows[settings_n].DockId)
+    for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
+        if (ImGuiID dock_id = settings->DockId)
             if (ImGuiDockContextPruneNodeData* data = pool.GetByKey(dock_id))
             {
                 data->CountWindows++;
@@ -13734,12 +13747,12 @@ void ImGui::DockBuilderRemoveNodeChildNodes(ImGuiID root_id)
     }
 
     // Apply to settings
-    for (int settings_n = 0; settings_n < ctx->SettingsWindows.Size; settings_n++)
-        if (ImGuiID window_settings_dock_id = ctx->SettingsWindows[settings_n].DockId)
+    for (ImGuiWindowSettings* settings = ctx->SettingsWindows.begin(); settings != NULL; settings = ctx->SettingsWindows.next_chunk(settings))
+        if (ImGuiID window_settings_dock_id = settings->DockId)
             for (int n = 0; n < nodes_to_remove.Size; n++)
                 if (nodes_to_remove[n]->ID == window_settings_dock_id)
                 {
-                    ctx->SettingsWindows[settings_n].DockId = root_id;
+                    settings->DockId = root_id;
                     break;
                 }
 
@@ -13768,9 +13781,8 @@ void ImGui::DockBuilderRemoveNodeDockedWindows(ImGuiID root_id, bool clear_persi
     ImGuiContext& g = *ctx;
     if (clear_persistent_docking_references)
     {
-        for (int n = 0; n < g.SettingsWindows.Size; n++)
+        for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
         {
-            ImGuiWindowSettings* settings = &g.SettingsWindows[n];
             bool want_removal = (root_id == 0) || (settings->DockId == root_id);
             if (!want_removal && settings->DockId != 0)
                 if (ImGuiDockNode* node = DockContextFindNodeByID(ctx, settings->DockId))
@@ -14276,12 +14288,10 @@ static void ImGui::DockSettingsRenameNodeReferences(ImGuiID old_node_id, ImGuiID
         if (window->DockId == old_node_id && window->DockNode == NULL)
             window->DockId = new_node_id;
     }
-    for (int settings_n = 0; settings_n < g.SettingsWindows.Size; settings_n++)     // FIXME-OPT: We could remove this loop by storing the index in the map
-    {
-        ImGuiWindowSettings* window_settings = &g.SettingsWindows[settings_n];
-        if (window_settings->DockId == old_node_id)
-            window_settings->DockId = new_node_id;
-    }
+    //// FIXME-OPT: We could remove this loop by storing the index in the map
+    for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
+        if (settings->DockId == old_node_id)
+            settings->DockId = new_node_id;
 }
 
 // Remove references stored in ImGuiWindowSettings to the given ImGuiDockNodeSettings
@@ -14289,19 +14299,17 @@ static void ImGui::DockSettingsRemoveNodeReferences(ImGuiID* node_ids, int node_
 {
     ImGuiContext& g = *GImGui;
     int found = 0;
-    for (int settings_n = 0; settings_n < g.SettingsWindows.Size; settings_n++)     // FIXME-OPT: We could remove this loop by storing the index in the map
-    {
-        ImGuiWindowSettings* window_settings = &g.SettingsWindows[settings_n];
+    //// FIXME-OPT: We could remove this loop by storing the index in the map
+    for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
         for (int node_n = 0; node_n < node_ids_count; node_n++)
-            if (window_settings->DockId == node_ids[node_n])
+            if (settings->DockId == node_ids[node_n])
             {
-                window_settings->DockId = 0;
-                window_settings->DockOrder = -1;
+                settings->DockId = 0;
+                settings->DockOrder = -1;
                 if (++found < node_ids_count)
                     break;
                 return;
             }
-    }
 }
 
 static ImGuiDockNodeSettings* ImGui::DockSettingsFindNodeSettings(ImGuiContext* ctx, ImGuiID id)
@@ -14676,8 +14684,8 @@ void ImGui::ShowMetricsWindow(bool* p_open)
     }
 
     // State
-    enum { WRT_OuterRect, WRT_OuterRectClipped, WRT_InnerRect, WRT_InnerClipRect, WRT_WorkRect, WRT_Contents, WRT_ContentsRegionRect, WRT_Count }; // Windows Rect Type
-    const char* wrt_rects_names[WRT_Count] = { "OuterRect", "OuterRectClipped", "InnerRect", "InnerClipRect", "WorkRect", "Contents", "ContentsRegionRect" };
+    enum { WRT_OuterRect, WRT_OuterRectClipped, WRT_InnerRect, WRT_InnerClipRect, WRT_WorkRect, WRT_Content, WRT_ContentRegionRect, WRT_Count }; // Windows Rect Type
+    const char* wrt_rects_names[WRT_Count] = { "OuterRect", "OuterRectClipped", "InnerRect", "InnerClipRect", "WorkRect", "Content", "ContentRegionRect" };
     static bool show_windows_rects = false;
     static int  show_windows_rect_type = WRT_WorkRect;
     static bool show_windows_begin_order = false;
@@ -14711,8 +14719,8 @@ void ImGui::ShowMetricsWindow(bool* p_open)
             else if (rect_type == WRT_InnerRect)            { return window->InnerRect; }
             else if (rect_type == WRT_InnerClipRect)        { return window->InnerClipRect; }
             else if (rect_type == WRT_WorkRect)             { return window->WorkRect; }
-            else if (rect_type == WRT_Contents)             { ImVec2 min = window->InnerRect.Min - window->Scroll + window->WindowPadding; return ImRect(min, min + window->ContentSize); }
-            else if (rect_type == WRT_ContentsRegionRect)   { return window->ContentsRegionRect; }
+            else if (rect_type == WRT_Content)              { ImVec2 min = window->InnerRect.Min - window->Scroll + window->WindowPadding; return ImRect(min, min + window->ContentSize); }
+            else if (rect_type == WRT_ContentRegionRect)    { return window->ContentRegionRect; }
             IM_ASSERT(0);
             return ImRect();
         }
@@ -14845,7 +14853,7 @@ void ImGui::ShowMetricsWindow(bool* p_open)
                     NodeColumns(&window->ColumnsStorage[n]);
                 ImGui::TreePop();
             }
-            ImGui::BulletText("Storage: %d bytes", window->StateStorage.Data.size_in_bytes());
+            NodeStorage(&window->StateStorage, "Storage");
             ImGui::TreePop();
         }
 
@@ -14948,6 +14956,18 @@ void ImGui::ShowMetricsWindow(bool* p_open)
                 ImGui::TreePop();
             }
         }
+
+        static void NodeStorage(ImGuiStorage* storage, const char* label)
+        {
+            if (!ImGui::TreeNode(label, "%s: %d entries, %d bytes", label, storage->Data.Size, storage->Data.size_in_bytes()))
+                return;
+            for (int n = 0; n < storage->Data.Size; n++)
+            {
+                const ImGuiStorage::ImGuiStoragePair& p = storage->Data[n];
+                ImGui::BulletText("Key 0x%08X Value { i: %d }", p.key, p.val_i); // Important: we currently don't store a type, real value may not be integer.
+            }
+            ImGui::TreePop();
+        }
     };
 
     Funcs::NodeWindows(g.Windows, "Windows");
@@ -14984,9 +15004,9 @@ void ImGui::ShowMetricsWindow(bool* p_open)
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("TabBars", "Tab Bars (%d)", g.TabBars.Data.Size))
+    if (ImGui::TreeNode("TabBars", "Tab Bars (%d)", g.TabBars.GetSize()))
     {
-        for (int n = 0; n < g.TabBars.Data.Size; n++)
+        for (int n = 0; n < g.TabBars.GetSize(); n++)
             Funcs::NodeTabBar(g.TabBars.GetByIndex(n));
         ImGui::TreePop();
     }
@@ -15017,9 +15037,9 @@ void ImGui::ShowMetricsWindow(bool* p_open)
                 SaveIniSettingsToDisk(g.IO.IniFilename);
             ImGui::Separator();
             ImGui::Text("Docked Windows:");
-            for (int n = 0; n < g.SettingsWindows.Size; n++)
-                if (g.SettingsWindows[n].DockId != 0)
-                    ImGui::BulletText("Window '%s' -> DockId %08X", g.SettingsWindows[n].Name, g.SettingsWindows[n].DockId);
+            for (ImGuiWindowSettings* settings = g.SettingsWindows.begin(); settings != NULL; settings = g.SettingsWindows.next_chunk(settings))
+                if (settings->DockId != 0)
+                    ImGui::BulletText("Window '%s' -> DockId %08X", settings->GetName(), settings->DockId);
             ImGui::Separator();
             ImGui::Text("Dock Nodes:");
             for (int n = 0; n < dc->SettingsNodes.Size; n++)
@@ -15031,7 +15051,7 @@ void ImGui::ShowMetricsWindow(bool* p_open)
                     if (ImGuiWindow* window = FindWindowByID(settings->SelectedWindowID))
                         selected_tab_name = window->Name;
                     else if (ImGuiWindowSettings* window_settings = FindWindowSettings(settings->SelectedWindowID))
-                        selected_tab_name = window_settings->Name;
+                        selected_tab_name = window_settings->GetName();
                 }
                 ImGui::BulletText("Node %08X, Parent %08X, SelectedTab %08X ('%s')", settings->ID, settings->ParentNodeID, settings->SelectedWindowID, selected_tab_name ? selected_tab_name : settings->SelectedWindowID ? "N/A" : "");
             }
@@ -15042,7 +15062,7 @@ void ImGui::ShowMetricsWindow(bool* p_open)
     }
 
 #if 0
-    if (ImGui::TreeNode("Tables", "Tables (%d)", g.Tables.Data.Size))
+    if (ImGui::TreeNode("Tables", "Tables (%d)", g.Tables.GetSize()))
     {
         ImGui::TreePop();
     }

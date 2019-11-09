@@ -155,7 +155,7 @@ See: [Wiki](https://github.com/ocornut/imgui/wiki) for many links, references, a
 
 See: [Articles about the IMGUI paradigm](https://github.com/ocornut/imgui/wiki#Articles-about-the-IMGUI-paradigm) to read/learn about the Immediate Mode GUI paradigm.
 
-If you are new to Dear ImGui and have issues with: compiling, linking, adding fonts, wiring inputs, running or displaying Dear ImGui: you can use [Discord server](https://discord.gg/NgJ4SEP) or [Discourse forums](https://discourse.dearimgui.org).
+If you are new to Dear ImGui and have issues with: compiling, linking, adding fonts, wiring inputs, running or displaying Dear ImGui: you can use [Discord server](http://discord.dearimgui.org).
 
 Otherwise, for any other questions, bug reports, requests, feedback, you may post on https://github.com/ocornut/imgui/issues. Please read and fill the New Issue template carefully.
 
@@ -176,7 +176,7 @@ How to help
 
 **How can I help?**
 
-- You may participate in the [Discord server](https://discord.gg/NgJ4SEP), [Discourse forums](https://discourse.dearimgui.org), GitHub [issues tracker](https://github.com/ocornut/imgui/issues).
+- You may participate in the [Discord server](http://discord.dearimgui.org), [GitHub forum/issues](https://github.com/ocornut/imgui/issues).
 - You may help with development and submit pull requests! Please understand that by submitting a PR you are also submitting a request for the maintainer to review your code and then take over its maintenance forever. PR should be crafted both in the interest in the end-users and also to ease the maintainer into understanding and accepting it.
 - See [Help wanted](https://github.com/ocornut/imgui/wiki/Help-Wanted) on the [Wiki](https://github.com/ocornut/imgui/wiki/) for some more ideas.
 - Have your company financially support this project.
@@ -213,6 +213,10 @@ Ongoing Dear ImGui development is financially supported by users and private spo
 
 And all other past and present supporters; THANK YOU!
 (Please contact me if you would like to be added or removed from this list)
+
+Dear ImGui is using software and services kindly provided free of charge for open source projects:
+- [PVS-Studio](https://www.viva64.com/en/b/0570/) for static analysis.
+- [GitHub actions](https://github.com/features/actions) for continuous integration systems.
 
 Credits
 -------
