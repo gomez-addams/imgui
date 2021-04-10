@@ -158,6 +158,7 @@
     <ClCompile Include="..\..\imgui.cpp" />
     <ClCompile Include="..\..\imgui_demo.cpp" />
     <ClCompile Include="..\..\imgui_draw.cpp" />
+    <ClCompile Include="..\..\imgui_tables.cpp" />
     <ClCompile Include="..\..\imgui_widgets.cpp" />
     <ClCompile Include="..\..\backends\imgui_impl_opengl3.cpp" />
     <ClCompile Include="..\..\backends\imgui_impl_sdl.cpp" />
@@ -174,7 +175,7 @@
     <ClInclude Include="..\libs\gl3w\GL\glcorearb.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\misc\natvis\imgui.natvis" />
+    <None Include="..\..\misc\debuggers\imgui.natvis" />
     <None Include="..\README.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

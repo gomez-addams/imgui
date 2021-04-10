@@ -97,7 +97,7 @@
     GLsizei height = (GLsizei)(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
     glViewport(0, 0, width, height);
 
-	glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+	glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
 	glClear(GL_COLOR_BUFFER_BIT);
 	ImGui_ImplOpenGL2_RenderDrawData(draw_data);
 
@@ -139,7 +139,7 @@
     animationTimer = nil;
 }
 
-// Forward Mouse/Keyboard events to dear imgui OSX backend. It returns true when imgui is expecting to use the event.
+// Forward Mouse/Keyboard events to Dear ImGui OSX backend.
 -(void)keyUp:(NSEvent *)event               { ImGui_ImplOSX_HandleEvent(event, self); }
 -(void)keyDown:(NSEvent *)event             { ImGui_ImplOSX_HandleEvent(event, self); }
 -(void)flagsChanged:(NSEvent *)event        { ImGui_ImplOSX_HandleEvent(event, self); }
