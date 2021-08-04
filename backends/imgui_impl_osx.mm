@@ -9,7 +9,8 @@
 //  [ ] Platform: Keys are all generally very broken. Best using [event keycode] and not [event characters]..
 //  [ ] Platform: Multi-viewport / platform windows.
 
-// You can copy and use unmodified imgui_impl_* files in your project. See examples/ folder for examples of using this.
+// You can use unmodified imgui_impl_* files in your project. See examples/ folder for examples of using this.
+// Prefer including the entire imgui/ repository into your project (either as a copy or as a submodule), and only build the backends you need.
 // If you are new to Dear ImGui, read documentation from the docs/ folder + read the top of imgui.cpp.
 // Read online: https://github.com/ocornut/imgui/tree/master/docs
 
@@ -19,6 +20,10 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
+//  2021-06-23: Inputs: Added a fix for shortcuts using CTRL key instead of CMD key.
+//  2021-04-19: Inputs: Added a fix for keys remaining stuck in pressed state when CMD-tabbing into different application.
+//  2021-01-27: Inputs: Added a fix for mouse position not being reported when mouse buttons other than left one are down.
+//  2020-10-28: Inputs: Added a fix for handling keypad-enter key.
 //  2020-05-25: Inputs: Added a fix for missing trackpad clicks when done with "soft tap".
 //  2019-12-05: Inputs: Added support for ImGuiMouseCursor_NotAllowed mouse cursor.
 //  2019-10-11: Inputs:  Fix using Backspace key.
@@ -29,12 +34,15 @@
 //  2018-11-30: Misc: Setting up io.BackendPlatformName so it can be displayed in the About Window.
 //  2018-07-07: Initial version.
 
+@class ImFocusObserver;
+
 // Data
 static CFAbsoluteTime g_Time = 0.0;
 static NSCursor*      g_MouseCursors[ImGuiMouseCursor_COUNT] = {};
 static bool           g_MouseCursorHidden = false;
 static bool           g_MouseJustPressed[ImGuiMouseButton_COUNT] = {};
 static bool           g_MouseDown[ImGuiMouseButton_COUNT] = {};
+static ImFocusObserver* g_FocusObserver = NULL;
 
 // Undocumented methods for creating cursors.
 @interface NSCursor()
@@ -42,6 +50,31 @@ static bool           g_MouseDown[ImGuiMouseButton_COUNT] = {};
 + (id)_windowResizeNorthEastSouthWestCursor;
 + (id)_windowResizeNorthSouthCursor;
 + (id)_windowResizeEastWestCursor;
+@end
+
+static void resetKeys()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    memset(io.KeysDown, 0, sizeof(io.KeysDown));
+    io.KeyCtrl = io.KeyShift = io.KeyAlt = io.KeySuper = false;
+}
+
+@interface ImFocusObserver : NSObject
+
+- (void)onApplicationBecomeInactive:(NSNotification*)aNotification;
+
+@end
+
+@implementation ImFocusObserver
+
+- (void)onApplicationBecomeInactive:(NSNotification*)aNotification
+{
+    // Unfocused applications do not receive input events, therefore we must manually
+    // release any pressed keys when application loses focus, otherwise they would remain
+    // stuck in a pressed state. https://github.com/ocornut/imgui/issues/3832
+    resetKeys();
+}
+
 @end
 
 // Functions
@@ -73,7 +106,7 @@ bool ImGui_ImplOSX_Init()
     io.KeyMap[ImGuiKey_Space]           = 32;
     io.KeyMap[ImGuiKey_Enter]           = 13;
     io.KeyMap[ImGuiKey_Escape]          = 27;
-    io.KeyMap[ImGuiKey_KeyPadEnter]     = 13;
+    io.KeyMap[ImGuiKey_KeyPadEnter]     = 3;
     io.KeyMap[ImGuiKey_A]               = 'A';
     io.KeyMap[ImGuiKey_C]               = 'C';
     io.KeyMap[ImGuiKey_V]               = 'V';
@@ -122,11 +155,18 @@ bool ImGui_ImplOSX_Init()
         return s_clipboard.Data;
     };
 
+    g_FocusObserver = [[ImFocusObserver alloc] init];
+    [[NSNotificationCenter defaultCenter] addObserver:g_FocusObserver
+                                             selector:@selector(onApplicationBecomeInactive:)
+                                                 name:NSApplicationDidResignActiveNotification
+                                               object:nil];
+
     return true;
 }
 
 void ImGui_ImplOSX_Shutdown()
 {
+    g_FocusObserver = NULL;
 }
 
 static void ImGui_ImplOSX_UpdateMouseCursorAndButtons()
@@ -171,7 +211,7 @@ void ImGui_ImplOSX_NewFrame(NSView* view)
     ImGuiIO& io = ImGui::GetIO();
     if (view)
     {
-        const float dpi = [view.window backingScaleFactor];
+        const float dpi = (float)[view.window backingScaleFactor];
         io.DisplaySize = ImVec2((float)view.bounds.size.width, (float)view.bounds.size.height);
         io.DisplayFramebufferScale = ImVec2(dpi, dpi);
     }
@@ -180,7 +220,7 @@ void ImGui_ImplOSX_NewFrame(NSView* view)
     if (g_Time == 0.0)
         g_Time = CFAbsoluteTimeGetCurrent();
     CFAbsoluteTime current_time = CFAbsoluteTimeGetCurrent();
-    io.DeltaTime = current_time - g_Time;
+    io.DeltaTime = (float)(current_time - g_Time);
     g_Time = current_time;
 
     ImGui_ImplOSX_UpdateMouseCursorAndButtons();
@@ -197,13 +237,6 @@ static int mapCharacterToKey(int c)
     if (c >= 0xF700 && c < 0xF700 + 256)
         return c - 0xF700 + 256;
     return -1;
-}
-
-static void resetKeys()
-{
-    ImGuiIO& io = ImGui::GetIO();
-    for (int n = 0; n < IM_ARRAYSIZE(io.KeysDown); n++)
-        io.KeysDown[n] = false;
 }
 
 bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
@@ -226,12 +259,12 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
         return io.WantCaptureMouse;
     }
 
-    if (event.type == NSEventTypeMouseMoved || event.type == NSEventTypeLeftMouseDragged)
+    if (event.type == NSEventTypeMouseMoved || event.type == NSEventTypeLeftMouseDragged || event.type == NSEventTypeRightMouseDragged || event.type == NSEventTypeOtherMouseDragged)
     {
         NSPoint mousePoint = event.locationInWindow;
         mousePoint = [view convertPoint:mousePoint fromView:nil];
         mousePoint = NSMakePoint(mousePoint.x, view.bounds.size.height - mousePoint.y);
-        io.MousePos = ImVec2(mousePoint.x, mousePoint.y);
+        io.MousePos = ImVec2((float)mousePoint.x, (float)mousePoint.y);
     }
 
     if (event.type == NSEventTypeScrollWheel)
@@ -258,9 +291,9 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
         }
 
         if (fabs(wheel_dx) > 0.0)
-            io.MouseWheelH += wheel_dx * 0.1f;
+            io.MouseWheelH += (float)wheel_dx * 0.1f;
         if (fabs(wheel_dy) > 0.0)
-            io.MouseWheel += wheel_dy * 0.1f;
+            io.MouseWheel += (float)wheel_dy * 0.1f;
         return io.WantCaptureMouse;
     }
 
@@ -268,16 +301,16 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
     if (event.type == NSEventTypeKeyDown)
     {
         NSString* str = [event characters];
-        int len = (int)[str length];
-        for (int i = 0; i < len; i++)
+        NSUInteger len = [str length];
+        for (NSUInteger i = 0; i < len; i++)
         {
             int c = [str characterAtIndex:i];
-            if (!io.KeyCtrl && !(c >= 0xF700 && c <= 0xFFFF) && c != 127)
+            if (!io.KeySuper && !(c >= 0xF700 && c <= 0xFFFF) && c != 127)
                 io.AddInputCharacter((unsigned int)c);
 
             // We must reset in case we're pressing a sequence of special keys while keeping the command pressed
             int key = mapCharacterToKey(c);
-            if (key != -1 && key < 256 && !io.KeyCtrl)
+            if (key != -1 && key < 256 && !io.KeySuper)
                 resetKeys();
             if (key != -1)
                 io.KeysDown[key] = true;
@@ -288,8 +321,8 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
     if (event.type == NSEventTypeKeyUp)
     {
         NSString* str = [event characters];
-        int len = (int)[str length];
-        for (int i = 0; i < len; i++)
+        NSUInteger len = [str length];
+        for (NSUInteger i = 0; i < len; i++)
         {
             int c = [str characterAtIndex:i];
             int key = mapCharacterToKey(c);
@@ -301,7 +334,6 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
 
     if (event.type == NSEventTypeFlagsChanged)
     {
-        ImGuiIO& io = ImGui::GetIO();
         unsigned int flags = [event modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask;
 
         bool oldKeyCtrl = io.KeyCtrl;
