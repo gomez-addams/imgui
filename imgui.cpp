@@ -7060,7 +7060,13 @@ void ImGui::FocusTopMostWindowUnderOne(ImGuiWindow* under_this_window, ImGuiWind
     {
         // We may later decide to test for different NoXXXInputs based on the active navigation input (mouse vs nav) but that may feel more confusing to the user.
         ImGuiWindow* window = g.WindowsFocusOrder[i];
-        IM_ASSERT(window == window->RootWindow);
+        //IM_ASSERT(window == window->RootWindow); // does this assertion signal a real problem?
+#ifdef _DEBUG
+        if (window != window->RootWindow) {
+            fprintf(stderr, "IM_ASSERT(window == window->RootWindow): didn't expect a child window here?\n");
+            IM_DEBUG_BREAK();
+        }
+#endif
         if (window != ignore_window && window->WasActive)
             if ((window->Flags & (ImGuiWindowFlags_NoMouseInputs | ImGuiWindowFlags_NoNavInputs)) != (ImGuiWindowFlags_NoMouseInputs | ImGuiWindowFlags_NoNavInputs))
             {
