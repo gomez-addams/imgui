@@ -7600,7 +7600,9 @@ static void ImGui::ErrorCheckNewFrameSanityChecks()
             IM_ASSERT(g.PlatformIO.Platform_SetWindowPos  != NULL && "Platform init didn't install handlers?");
             IM_ASSERT(g.PlatformIO.Platform_GetWindowSize != NULL && "Platform init didn't install handlers?");
             IM_ASSERT(g.PlatformIO.Platform_SetWindowSize != NULL && "Platform init didn't install handlers?");
+#if 0 // qStrataHacks -- when headless the monitors list will be zero size
             IM_ASSERT(g.PlatformIO.Monitors.Size > 0 && "Platform init didn't setup Monitors list?");
+#endif
             IM_ASSERT((g.Viewports[0]->PlatformUserData != NULL || g.Viewports[0]->PlatformHandle != NULL) && "Platform init didn't setup main viewport.");
             if (g.IO.ConfigDockingTransparentPayload && (g.IO.ConfigFlags & ImGuiConfigFlags_DockingEnable))
                 IM_ASSERT(g.PlatformIO.Platform_SetWindowAlpha != NULL && "Platform_SetWindowAlpha handler is required to use io.ConfigDockingTransparent!");
@@ -8851,7 +8853,11 @@ ImRect ImGui::GetWindowAllowedExtentRect(ImGuiWindow* window)
 {
     ImGuiContext& g = *GImGui;
     ImRect r_screen;
+#if 1 // qStrataHacks -- when headless the monitors list will be zero size
+    if (window->ViewportAllowPlatformMonitorExtend >= 0 && window->ViewportAllowPlatformMonitorExtend < g.PlatformIO.Monitors.Size)
+#else
     if (window->ViewportAllowPlatformMonitorExtend >= 0)
+#endif
     {
         // Extent with be in the frame of reference of the given viewport (so Min is likely to be negative here)
         const ImGuiPlatformMonitor& monitor = g.PlatformIO.Monitors[window->ViewportAllowPlatformMonitorExtend];
@@ -11222,7 +11228,11 @@ static void ImGui::UpdateViewportsNewFrame()
         float new_dpi_scale;
         if (g.PlatformIO.Platform_GetWindowDpiScale && platform_funcs_available)
             new_dpi_scale = g.PlatformIO.Platform_GetWindowDpiScale(viewport);
+#if 1 // qStrataHacks -- when headless the monitors list will be zero size
+        else if (viewport->PlatformMonitor >= 0 && viewport->PlatformMonitor < g.PlatformIO.Monitors.Size)
+#else
         else if (viewport->PlatformMonitor != -1)
+#endif
             new_dpi_scale = g.PlatformIO.Monitors[viewport->PlatformMonitor].DpiScale;
         else
             new_dpi_scale = (viewport->DpiScale != 0.0f) ? viewport->DpiScale : 1.0f;
@@ -11364,7 +11374,11 @@ ImGuiViewportP* ImGui::AddUpdateViewport(ImGuiWindow* window, ImGuiID id, const 
 
         // Store initial DpiScale before the OS platform window creation, based on expected monitor data.
         // This is so we can select an appropriate font size on the first frame of our window lifetime
+#if 1 // qStrataHacks -- when headless the monitors list will be zero size
+        if (viewport->PlatformMonitor >= 0 && viewport->PlatformMonitor < g.PlatformIO.Monitors.Size)
+#else
         if (viewport->PlatformMonitor != -1)
+#endif
             viewport->DpiScale = g.PlatformIO.Monitors[viewport->PlatformMonitor].DpiScale;
     }
 
