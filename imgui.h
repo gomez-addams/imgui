@@ -2654,7 +2654,7 @@ struct ImGuiPlatformIO
     // (in the future we will attempt to organize this feature to remove the need for a "main viewport")
     ImGuiViewport*                  MainViewport;                           // Guaranteed to be == Viewports[0]
     ImVector<ImGuiViewport*>        Viewports;                              // Main viewports, followed by all secondary viewports.
-    ImGuiPlatformIO()               { memset(this, 0, sizeof(*this)); }     // Zero clear
+    ImGuiPlatformIO()               { memset(static_cast<void*>(this), 0, sizeof(*this)); }     // Zero clear
 };
 
 // (Optional) This is required when enabling multi-viewport. Represent the bounds of each connected monitor/display and their DPI.
